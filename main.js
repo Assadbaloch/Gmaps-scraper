@@ -396,23 +396,7 @@ try {
 
                         log.info(`Extracted: ${placeData.business_name}`);
 
-                        // Apply filters
-                        if (skipClosedPlaces && placeData.isClosed) {
-                            log.info(`❌ Skipping (closed): ${placeData.business_name}`);
-                            continue;
-                        }
-
-                        if (requireWebsite && !placeData.website) {
-                            log.info(`❌ Skipping (no website): ${placeData.business_name}`);
-                            continue;
-                        }
-
-                        if (minRating !== null && (placeData.rating === null || placeData.rating < minRating)) {
-                            log.info(`❌ Skipping (rating ${placeData.rating}): ${placeData.business_name}`);
-                            continue;
-                        }
-
-                        // Deduplication
+                        // Deduplication first (before any filters)
                         const placeKey = generatePlaceKey(
                             placeData.business_name, 
                             placeData.address || ''
@@ -430,6 +414,19 @@ try {
                             placeData.email = await extractEmailFromWebsite(placeData.website, log);
                         }
 
+                        // Apply filters AFTER extraction to mark filtered status
+                        let filterStatus = 'extracted';
+                        
+                        if (skipClosedPlaces && placeData.isClosed) {
+                            filterStatus = 'closed';
+                        } else if (requireWebsite && !placeData.website) {
+                            filterStatus = 'no_website';
+                        } else if (minRating !== null && (placeData.rating === null || placeData.rating < minRating)) {
+                            filterStatus = 'low_rating';
+                        }
+
+                        placeData.filter_status = filterStatus;
+
                         delete placeData.isClosed;
 
                         // Add query metadata
@@ -443,8 +440,11 @@ try {
                         placesExtractedThisQuery++;
                         totalExtracted++;
 
-                        log.info(`✅ [${totalExtracted}] ${placeData.business_name}`);
-                        log.info(`   📞 ${placeData.phone || 'N/A'} | 🌐 ${placeData.website ? 'Yes' : 'No'} | ⭐ ${placeData.rating || 'N/A'} | 📧 ${placeData.email || 'N/A'}`);
+                        const statusEmoji = filterStatus === 'extracted' ? '✅' : '⚠️';
+                        const statusText = filterStatus === 'extracted' ? '' : ` [${filterStatus}]`;
+                        
+                        log.info(`${statusEmoji} [${totalExtracted}] ${placeData.business_name}${statusText}`);
+                        log.info(`   📞 ${placeData.phone || 'N/A'} | 🌐 ${placeData.website || 'N/A'} | ⭐ ${placeData.rating || 'N/A'} | 📧 ${placeData.email || 'N/A'}`);
 
                     } catch (error) {
                         log.error(`Error processing place: ${error.message}`);
