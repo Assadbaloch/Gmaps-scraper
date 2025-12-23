@@ -31,24 +31,35 @@ function generatePlaceKey(businessName, address) {
 /**
  * Extract email from website homepage
  */
-async function extractEmailFromWebsite(page, url, log) {
+async function extractEmailFromWebsite(url, log) {
     try {
         log.info(`Fetching website for email: ${url}`);
         
-        await page.goto(url, { 
-            waitUntil: 'domcontentloaded',
-            timeout: 15000 
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            signal: AbortSignal.timeout(15000)
         });
         
-        await page.waitForTimeout(2000);
+        if (!response.ok) {
+            log.warning(`HTTP ${response.status} when fetching ${url}`);
+            return null;
+        }
         
-        const content = await page.content();
+        const content = await response.text();
         const emails = content.match(EMAIL_REGEX);
         
         if (emails && emails.length > 0) {
-            // Filter out common non-email matches and get unique emails
             const validEmails = [...new Set(emails)]
-                .filter(email => !email.includes('.png') && !email.includes('.jpg'));
+                .filter(email => 
+                    !email.includes('.png') && 
+                    !email.includes('.jpg') &&
+                    !email.includes('.jpeg') &&
+                    !email.includes('.gif') &&
+                    !email.includes('example.com') &&
+                    !email.includes('sentry.io')
+                );
             
             if (validEmails.length > 0) {
                 log.info(`Found email: ${validEmails[0]}`);
@@ -94,26 +105,31 @@ async function scrollResultsPanel(page, log) {
 }
 
 /**
- * Click on a place card and extract detailed information from the side panel
+ * Extract place URLs from the search results list
  */
-async function extractDetailedPlaceInfo(page, card, log) {
+async function extractPlaceUrls(page, log) {
     try {
-        // Get business name from the card first
-        const businessName = await card.$eval('a[aria-label]', (el) => {
-            return el.getAttribute('aria-label') || el.textContent.trim();
-        }).catch(() => null);
+        const urls = await page.$$eval('div[role="feed"] a[href*="/maps/place/"]', (links) => {
+            return [...new Set(links.map(link => link.href))];
+        });
+        
+        log.info(`Extracted ${urls.length} place URLs`);
+        return urls;
+    } catch (error) {
+        log.warning(`Failed to extract place URLs: ${error.message}`);
+        return [];
+    }
+}
 
-        if (!businessName) {
-            return null;
-        }
+/**
+ * Extract detailed information from a place's individual page
+ */
+async function extractPlaceDetailsFromPage(page, log) {
+    try {
+        // Wait for the place details to load
+        await page.waitForSelector('h1', { timeout: 10000 });
+        await page.waitForTimeout(2000);
 
-        log.info(`Clicking on: ${businessName}`);
-
-        // Click on the place card to open details panel
-        await card.click();
-        await page.waitForTimeout(3000); // Wait for details to load
-
-        // Extract all information from the details panel
         const placeData = await page.evaluate(() => {
             const data = {
                 business_name: null,
@@ -124,98 +140,102 @@ async function extractDetailedPlaceInfo(page, card, log) {
                 rating: null,
                 reviews_count: null,
                 email: null,
-                hours: null,
-                plus_code: null
+                plus_code: null,
+                price_level: null,
+                isClosed: false
             };
 
-            // Business name from header
-            const nameElement = document.querySelector('h1[class*="fontHeadlineLarge"]');
+            // Business name
+            const nameElement = document.querySelector('h1[class*="fontHeadlineLarge"]') || 
+                               document.querySelector('h1');
             if (nameElement) {
                 data.business_name = nameElement.textContent.trim();
             }
 
-            // Category
-            const categoryButton = document.querySelector('button[jsaction*="category"]');
-            if (categoryButton) {
-                data.category = categoryButton.textContent.trim();
+            // Category (secondary text under name)
+            const categoryElement = document.querySelector('button[jsaction*="category"]');
+            if (categoryElement) {
+                data.category = categoryElement.textContent.trim();
             }
 
             // Rating and reviews
-            const ratingElement = document.querySelector('div[jsaction*="pane.rating"]');
-            if (ratingElement) {
-                const ratingText = ratingElement.textContent;
+            const ratingDiv = document.querySelector('div[jsaction*="pane.rating"]');
+            if (ratingDiv) {
+                const ratingText = ratingDiv.textContent;
                 const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
                 if (ratingMatch) {
                     data.rating = parseFloat(ratingMatch[1]);
                 }
-                const reviewsMatch = ratingText.match(/\((\d+(?:,\d+)*)\)/);
+                const reviewsMatch = ratingText.match(/\((\d+(?:,|\s)*\d*)\)/);
                 if (reviewsMatch) {
-                    data.reviews_count = parseInt(reviewsMatch[1].replace(/,/g, ''));
+                    data.reviews_count = parseInt(reviewsMatch[1].replace(/[,\s]/g, ''));
                 }
             }
 
-            // Get all buttons in the action bar (phone, website, etc.)
-            const buttons = document.querySelectorAll('button[data-item-id]');
-            buttons.forEach(button => {
+            // Price level ($ signs)
+            const priceElement = document.querySelector('span[aria-label*="Price"]');
+            if (priceElement) {
+                const priceText = priceElement.getAttribute('aria-label');
+                const priceMatch = priceText?.match(/(\$+)/);
+                if (priceMatch) {
+                    data.price_level = priceMatch[1];
+                }
+            }
+
+            // Get all buttons with data-item-id
+            const allButtons = document.querySelectorAll('button[data-item-id]');
+            
+            allButtons.forEach(button => {
                 const ariaLabel = button.getAttribute('aria-label') || '';
+                const itemId = button.getAttribute('data-item-id');
+                
+                // Address
+                if (itemId && itemId.startsWith('address')) {
+                    data.address = button.textContent.trim();
+                }
                 
                 // Website
-                if (ariaLabel.toLowerCase().includes('website')) {
-                    const link = button.querySelector('a');
+                if (ariaLabel.toLowerCase().includes('website') || itemId === 'authority') {
+                    const link = button.querySelector('a[href]');
                     if (link) {
-                        const href = link.getAttribute('href');
+                        let href = link.getAttribute('href');
+                        // Handle Google redirect URLs
                         if (href && href.includes('/url?q=')) {
                             try {
                                 const urlParams = new URLSearchParams(href.split('?')[1]);
-                                data.website = urlParams.get('q');
+                                data.website = decodeURIComponent(urlParams.get('q') || '');
                             } catch (e) {
                                 data.website = href;
                             }
-                        } else if (href) {
+                        } else if (href && !href.includes('google.com')) {
                             data.website = href;
                         }
                     }
                 }
                 
-                // Phone
-                if (ariaLabel.toLowerCase().includes('phone') || ariaLabel.toLowerCase().includes('call')) {
-                    const phoneMatch = ariaLabel.match(/[\+\d][\d\s\-\(\)]+/);
+                // Phone number
+                if (ariaLabel.toLowerCase().includes('phone') || itemId && itemId.includes('phone')) {
+                    // Extract phone from aria-label or text
+                    const phoneMatch = ariaLabel.match(/[\+\(]?[\d\s\-\(\)\.]+/) || 
+                                     button.textContent.match(/[\+\(]?[\d\s\-\(\)\.]+/);
                     if (phoneMatch) {
                         data.phone = phoneMatch[0].trim();
                     }
                 }
-            });
-
-            // Address and other info from the info section
-            const infoElements = document.querySelectorAll('button[data-item-id^="address"]');
-            infoElements.forEach(elem => {
-                const text = elem.textContent.trim();
-                const ariaLabel = elem.getAttribute('aria-label') || '';
                 
-                if (ariaLabel.toLowerCase().includes('address') || text.match(/\d+.*(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive)/i)) {
-                    data.address = text;
+                // Plus code
+                if (itemId === 'oloc') {
+                    data.plus_code = button.textContent.trim();
                 }
             });
 
-            // Try alternative address selector
-            if (!data.address) {
-                const addressDiv = document.querySelector('[data-item-id="address"]');
-                if (addressDiv) {
-                    data.address = addressDiv.textContent.trim();
-                }
-            }
+            // Check for permanently closed
+            const bodyText = document.body.textContent.toLowerCase();
+            data.isClosed = bodyText.includes('permanently closed') || 
+                           bodyText.includes('closed permanently') ||
+                           bodyText.includes('temporarily closed');
 
-            // Plus code
-            const plusCodeButton = document.querySelector('button[data-item-id="oloc"]');
-            if (plusCodeButton) {
-                data.plus_code = plusCodeButton.textContent.trim();
-            }
-
-            // Check if permanently closed
-            const closedText = document.body.textContent;
-            data.isClosed = closedText.includes('Permanently closed') || closedText.includes('Closed permanently');
-
-            // Try to find email in the visible content (some businesses show it)
+            // Look for email in visible content
             const emailMatch = document.body.textContent.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
             if (emailMatch) {
                 data.email = emailMatch[0];
@@ -224,12 +244,10 @@ async function extractDetailedPlaceInfo(page, card, log) {
             return data;
         });
 
-        log.info(`Extracted: ${placeData.business_name} | Phone: ${placeData.phone || 'N/A'} | Website: ${placeData.website || 'N/A'}`);
-
         return placeData;
 
     } catch (error) {
-        log.warning(`Failed to extract detailed info: ${error.message}`);
+        log.warning(`Failed to extract place details: ${error.message}`);
         return null;
     }
 }
@@ -244,27 +262,6 @@ async function waitForResults(page, log) {
         return true;
     } catch (error) {
         log.error('Results panel did not load');
-        return false;
-    }
-}
-
-/**
- * Check if we've reached the end of results
- */
-async function isEndOfResults(page, log) {
-    try {
-        const endText = await page.evaluate(() => {
-            const body = document.body.textContent;
-            return body.includes("You've reached the end of the list") || 
-                   body.includes("You've reached the end");
-        });
-        
-        if (endText) {
-            log.info('Reached end of results');
-            return true;
-        }
-        return false;
-    } catch (error) {
         return false;
     }
 }
@@ -287,14 +284,14 @@ try {
         language = 'en',
         skipClosedPlaces = true,
         minRating = null,
-        requireWebsite = false
+        requireWebsite = false,
+        extractEmailFromWebsite: shouldExtractEmail = true
     } = input;
 
     if (!queries || queries.length === 0) {
         throw new Error('queries array is required and must not be empty');
     }
 
-    // Validate each query
     for (const query of queries) {
         if (!query.searchTerm || query.searchTerm.trim() === '') {
             throw new Error('Each query must have a searchTerm');
@@ -309,7 +306,8 @@ try {
         language,
         skipClosedPlaces,
         minRating,
-        requireWebsite
+        requireWebsite,
+        extractEmailFromWebsite: shouldExtractEmail
     });
 
     console.log('Queries to process:', queries);
@@ -345,44 +343,62 @@ try {
                     return;
                 }
 
-                let placesExtractedThisQuery = 0;
+                log.info('Scrolling to load all places...');
+
+                let allPlaceUrls = [];
                 let scrollAttempts = 0;
-                let noNewResultsCount = 0;
-                let processedCardIndices = new Set();
+                let noNewUrlsCount = 0;
+                let previousUrlCount = 0;
 
-                log.info('Starting to extract all available places...');
-
+                // Scroll and collect all place URLs
                 while (scrollAttempts < MAX_SCROLL_ATTEMPTS) {
-                    const reachedEnd = await isEndOfResults(page, log);
-                    if (reachedEnd) {
-                        log.info('Reached end of results');
-                        break;
+                    const currentUrls = await extractPlaceUrls(page, log);
+                    allPlaceUrls = [...new Set([...allPlaceUrls, ...currentUrls])];
+
+                    if (allPlaceUrls.length === previousUrlCount) {
+                        noNewUrlsCount++;
+                        if (noNewUrlsCount >= NO_NEW_RESULTS_THRESHOLD) {
+                            log.info('No new URLs found, stopping scroll');
+                            break;
+                        }
+                    } else {
+                        noNewUrlsCount = 0;
+                        previousUrlCount = allPlaceUrls.length;
                     }
 
-                    const cards = await page.$$('div[role="feed"] > div > div[jsaction]');
-                    log.info(`Found ${cards.length} result cards (scroll attempt ${scrollAttempts + 1})`);
+                    const scrolled = await scrollResultsPanel(page, log);
+                    scrollAttempts++;
 
-                    let newPlacesThisScroll = 0;
+                    if (!scrolled) {
+                        await page.waitForTimeout(1000);
+                    }
+                }
 
-                    // Process cards we haven't seen yet
-                    for (let i = 0; i < cards.length; i++) {
-                        if (processedCardIndices.has(i)) {
-                            continue;
-                        }
+                log.info(`Total unique place URLs collected: ${allPlaceUrls.length}`);
 
-                        const card = cards[i];
-                        processedCardIndices.add(i);
+                // Now visit each place URL and extract details
+                let placesExtractedThisQuery = 0;
 
-                        // Extract detailed info by clicking on the card
-                        const placeData = await extractDetailedPlaceInfo(page, card, log);
+                for (let i = 0; i < allPlaceUrls.length; i++) {
+                    const placeUrl = allPlaceUrls[i];
+                    
+                    try {
+                        log.info(`[${i + 1}/${allPlaceUrls.length}] Visiting place...`);
+                        
+                        await page.goto(placeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        
+                        const placeData = await extractPlaceDetailsFromPage(page, log);
                         
                         if (!placeData || !placeData.business_name) {
+                            log.warning('Could not extract business name, skipping');
                             continue;
                         }
+
+                        log.info(`Extracted: ${placeData.business_name}`);
 
                         // Apply filters
                         if (skipClosedPlaces && placeData.isClosed) {
-                            log.info(`❌ Skipping closed: ${placeData.business_name}`);
+                            log.info(`❌ Skipping (closed): ${placeData.business_name}`);
                             continue;
                         }
 
@@ -392,7 +408,7 @@ try {
                         }
 
                         if (minRating !== null && (placeData.rating === null || placeData.rating < minRating)) {
-                            log.info(`❌ Skipping (low rating ${placeData.rating}): ${placeData.business_name}`);
+                            log.info(`❌ Skipping (rating ${placeData.rating}): ${placeData.business_name}`);
                             continue;
                         }
 
@@ -409,18 +425,9 @@ try {
 
                         seenPlaces.add(placeKey);
 
-                        // Extract email from website if available and no email found yet
-                        if (placeData.website && !placeData.email) {
-                            const emailPage = await page.context().newPage();
-                            try {
-                                placeData.email = await extractEmailFromWebsite(
-                                    emailPage, 
-                                    placeData.website, 
-                                    log
-                                );
-                            } finally {
-                                await emailPage.close();
-                            }
+                        // Extract email from website if enabled and available
+                        if (shouldExtractEmail && placeData.website && !placeData.email) {
+                            placeData.email = await extractEmailFromWebsite(placeData.website, log);
                         }
 
                         delete placeData.isClosed;
@@ -429,61 +436,41 @@ try {
                         placeData.query_searchTerm = searchTerm;
                         placeData.query_location = location;
                         placeData.query_index = queryIndex + 1;
+                        placeData.google_maps_url = placeUrl;
 
                         await Dataset.pushData(placeData);
                         
                         placesExtractedThisQuery++;
                         totalExtracted++;
-                        newPlacesThisScroll++;
 
-                        log.info(`✅ Extracted #${totalExtracted}: ${placeData.business_name}`);
-                        log.info(`   📞 ${placeData.phone || 'No phone'} | 🌐 ${placeData.website ? 'Has website' : 'No website'} | ⭐ ${placeData.rating || 'N/A'}`);
-                    }
+                        log.info(`✅ [${totalExtracted}] ${placeData.business_name}`);
+                        log.info(`   📞 ${placeData.phone || 'N/A'} | 🌐 ${placeData.website ? 'Yes' : 'No'} | ⭐ ${placeData.rating || 'N/A'} | 📧 ${placeData.email || 'N/A'}`);
 
-                    if (newPlacesThisScroll === 0) {
-                        noNewResultsCount++;
-                        log.info(`No new results (${noNewResultsCount}/${NO_NEW_RESULTS_THRESHOLD})`);
-                        
-                        if (noNewResultsCount >= NO_NEW_RESULTS_THRESHOLD) {
-                            log.info('No new results after multiple scroll attempts, moving to next query');
-                            break;
-                        }
-                    } else {
-                        noNewResultsCount = 0;
-                    }
-
-                    const scrolled = await scrollResultsPanel(page, log);
-                    scrollAttempts++;
-
-                    if (!scrolled) {
-                        log.info('Cannot scroll further, checking for more results...');
-                        await page.waitForTimeout(2000);
+                    } catch (error) {
+                        log.error(`Error processing place: ${error.message}`);
+                        continue;
                     }
                 }
 
                 log.info(`\n📊 Completed Query ${queryIndex + 1}/${queries.length}:`);
                 log.info(`  - Search: "${searchTerm}"`);
                 log.info(`  - Location: "${location}"`);
+                log.info(`  - Places found: ${allPlaceUrls.length}`);
                 log.info(`  - Places extracted: ${placesExtractedThisQuery}`);
                 log.info(`  - Total dataset size: ${totalExtracted}\n`);
             },
 
             failedRequestHandler({ request, log }) {
-                log.error(`Request failed for query: ${request.url}`);
+                log.error(`Request failed: ${request.url}`);
             }
         });
 
         const searchQuery = `${searchTerm} ${location}`;
         const url = `${GOOGLE_MAPS_URL}${encodeURIComponent(searchQuery)}?hl=${language}`;
         
-        const requests = [{
-            url,
-            userData: { searchTerm, location, queryIndex }
-        }];
+        await crawler.run([{ url, userData: { searchTerm, location, queryIndex } }]);
 
-        await crawler.run(requests);
-
-        console.log(`Completed processing query ${queryIndex + 1}/${queries.length}`);
+        console.log(`✓ Completed query ${queryIndex + 1}/${queries.length}\n`);
     }
 
     console.log('\n' + '='.repeat(80));
@@ -491,11 +478,10 @@ try {
     console.log('='.repeat(80));
     console.log(`Total queries processed: ${queries.length}`);
     console.log(`Total unique places extracted: ${totalExtracted}`);
-    console.log(`Places in dataset: ${seenPlaces.size}`);
     console.log('='.repeat(80) + '\n');
 
 } catch (error) {
-    console.error('❌ Actor failed with error:', error);
+    console.error('❌ Actor failed:', error);
     throw error;
 }
 
