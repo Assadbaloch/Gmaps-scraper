@@ -7,6 +7,7 @@
       "title": "Search Queries",
       "type": "array",
       "description": "Array of search queries. Each query needs searchTerm and location. Processed in chronological order.",
+      "editor": "json",
       "prefill": [
         {
           "searchTerm": "restaurants",
@@ -44,31 +45,25 @@
       "enum": ["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh"],
       "enumTitles": ["English", "Spanish", "French", "German", "Italian", "Portuguese", "Russian", "Japanese", "Korean", "Chinese"]
     },
-    "filtersSection": {
-      "title": "Filters & Requirements",
-      "type": "object",
-      "properties": {
-        "skipClosedPlaces": {
-          "title": "Skip Closed Places",
-          "type": "boolean",
-          "description": "Skip permanently closed locations",
-          "default": true
-        },
-        "minRating": {
-          "title": "Minimum Rating",
-          "type": "number",
-          "description": "Minimum rating (1-5). Leave empty to include all ratings",
-          "minimum": 1,
-          "maximum": 5,
-          "nullable": true
-        },
-        "requireWebsite": {
-          "title": "Require Website",
-          "type": "boolean",
-          "description": "Only include places that have a website",
-          "default": false
-        }
-      }
+    "skipClosedPlaces": {
+      "title": "Skip Closed Places",
+      "type": "boolean",
+      "description": "Skip permanently closed locations",
+      "default": true
+    },
+    "minRating": {
+      "title": "Minimum Rating",
+      "type": "number",
+      "description": "Minimum rating (1-5). Leave empty to include all ratings",
+      "minimum": 1,
+      "maximum": 5,
+      "nullable": true
+    },
+    "requireWebsite": {
+      "title": "Require Website",
+      "type": "boolean",
+      "description": "Only include places that have a website",
+      "default": false
     }
   },
   "required": ["queries"]
