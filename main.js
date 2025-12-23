@@ -10,10 +10,10 @@ import { PlaywrightCrawler, Dataset } from 'crawlee';
 // ============================================================================
 
 const GOOGLE_MAPS_URL = 'https://www.google.com/maps/search/';
-const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const SCROLL_DELAY = 2000;
 const MAX_SCROLL_ATTEMPTS = 100;
-const REQUEST_TIMEOUT = 120000;
+const REQUEST_TIMEOUT = 180000;
 const NO_NEW_RESULTS_THRESHOLD = 5;
 
 // ============================================================================
@@ -40,12 +40,20 @@ async function extractEmailFromWebsite(page, url, log) {
             timeout: 15000 
         });
         
-        const content = await page.content();
-        const emailMatch = content.match(EMAIL_REGEX);
+        await page.waitForTimeout(2000);
         
-        if (emailMatch) {
-            log.info(`Found email: ${emailMatch[0]}`);
-            return emailMatch[0];
+        const content = await page.content();
+        const emails = content.match(EMAIL_REGEX);
+        
+        if (emails && emails.length > 0) {
+            // Filter out common non-email matches and get unique emails
+            const validEmails = [...new Set(emails)]
+                .filter(email => !email.includes('.png') && !email.includes('.jpg'));
+            
+            if (validEmails.length > 0) {
+                log.info(`Found email: ${validEmails[0]}`);
+                return validEmails[0];
+            }
         }
         
         log.info('No email found on homepage');
@@ -86,104 +94,142 @@ async function scrollResultsPanel(page, log) {
 }
 
 /**
- * Extract place details from a result card - IMPROVED VERSION
+ * Click on a place card and extract detailed information from the side panel
  */
-async function extractPlaceDetails(card, log) {
+async function extractDetailedPlaceInfo(page, card, log) {
     try {
-        // Extract business name
+        // Get business name from the card first
         const businessName = await card.$eval('a[aria-label]', (el) => {
-            const ariaLabel = el.getAttribute('aria-label');
-            return ariaLabel || el.textContent.trim();
+            return el.getAttribute('aria-label') || el.textContent.trim();
         }).catch(() => null);
 
         if (!businessName) {
             return null;
         }
 
-        // Extract rating
-        const rating = await card.$eval('span[role="img"]', (el) => {
-            const ariaLabel = el.getAttribute('aria-label');
-            const match = ariaLabel?.match(/(\d+\.?\d*)\s+stars?/i);
-            return match ? parseFloat(match[1]) : null;
-        }).catch(() => null);
+        log.info(`Clicking on: ${businessName}`);
 
-        // IMPROVED: Extract all information including website
-        const details = await card.evaluate((cardElement) => {
-            let address = null;
-            let phone = null;
-            let website = null;
+        // Click on the place card to open details panel
+        await card.click();
+        await page.waitForTimeout(3000); // Wait for details to load
 
-            // Get all text content
-            const allText = cardElement.textContent;
+        // Extract all information from the details panel
+        const placeData = await page.evaluate(() => {
+            const data = {
+                business_name: null,
+                category: null,
+                address: null,
+                phone: null,
+                website: null,
+                rating: null,
+                reviews_count: null,
+                email: null,
+                hours: null,
+                plus_code: null
+            };
 
-            // Find all links in the card
-            const links = cardElement.querySelectorAll('a');
-            
-            // Look for website link - improved detection
-            for (const link of links) {
-                const href = link.getAttribute('href');
-                const ariaLabel = link.getAttribute('aria-label');
+            // Business name from header
+            const nameElement = document.querySelector('h1[class*="fontHeadlineLarge"]');
+            if (nameElement) {
+                data.business_name = nameElement.textContent.trim();
+            }
+
+            // Category
+            const categoryButton = document.querySelector('button[jsaction*="category"]');
+            if (categoryButton) {
+                data.category = categoryButton.textContent.trim();
+            }
+
+            // Rating and reviews
+            const ratingElement = document.querySelector('div[jsaction*="pane.rating"]');
+            if (ratingElement) {
+                const ratingText = ratingElement.textContent;
+                const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
+                if (ratingMatch) {
+                    data.rating = parseFloat(ratingMatch[1]);
+                }
+                const reviewsMatch = ratingText.match(/\((\d+(?:,\d+)*)\)/);
+                if (reviewsMatch) {
+                    data.reviews_count = parseInt(reviewsMatch[1].replace(/,/g, ''));
+                }
+            }
+
+            // Get all buttons in the action bar (phone, website, etc.)
+            const buttons = document.querySelectorAll('button[data-item-id]');
+            buttons.forEach(button => {
+                const ariaLabel = button.getAttribute('aria-label') || '';
                 
-                // Check if it's a website link (not Google links)
-                if (href && (
-                    (href.startsWith('http') && !href.includes('google.com')) ||
-                    (ariaLabel && ariaLabel.toLowerCase().includes('website'))
-                )) {
-                    // If it's a Google redirect, extract the actual URL
-                    if (href.includes('/url?q=')) {
-                        try {
-                            const urlParams = new URLSearchParams(href.split('?')[1]);
-                            website = urlParams.get('q') || href;
-                        } catch (e) {
-                            website = href;
+                // Website
+                if (ariaLabel.toLowerCase().includes('website')) {
+                    const link = button.querySelector('a');
+                    if (link) {
+                        const href = link.getAttribute('href');
+                        if (href && href.includes('/url?q=')) {
+                            try {
+                                const urlParams = new URLSearchParams(href.split('?')[1]);
+                                data.website = urlParams.get('q');
+                            } catch (e) {
+                                data.website = href;
+                            }
+                        } else if (href) {
+                            data.website = href;
                         }
-                    } else {
-                        website = href;
                     }
-                    break;
+                }
+                
+                // Phone
+                if (ariaLabel.toLowerCase().includes('phone') || ariaLabel.toLowerCase().includes('call')) {
+                    const phoneMatch = ariaLabel.match(/[\+\d][\d\s\-\(\)]+/);
+                    if (phoneMatch) {
+                        data.phone = phoneMatch[0].trim();
+                    }
+                }
+            });
+
+            // Address and other info from the info section
+            const infoElements = document.querySelectorAll('button[data-item-id^="address"]');
+            infoElements.forEach(elem => {
+                const text = elem.textContent.trim();
+                const ariaLabel = elem.getAttribute('aria-label') || '';
+                
+                if (ariaLabel.toLowerCase().includes('address') || text.match(/\d+.*(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive)/i)) {
+                    data.address = text;
+                }
+            });
+
+            // Try alternative address selector
+            if (!data.address) {
+                const addressDiv = document.querySelector('[data-item-id="address"]');
+                if (addressDiv) {
+                    data.address = addressDiv.textContent.trim();
                 }
             }
 
-            // Extract address - look for text with street patterns
-            const divs = cardElement.querySelectorAll('div');
-            for (const div of divs) {
-                const text = div.textContent.trim();
-                
-                // Address detection
-                if (!address && (
-                    text.match(/\d+.*(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Lane|Way|Court|Place|Circle|Plaza|Parkway)/i) ||
-                    text.match(/^\d+\s+[A-Za-z]/) ||
-                    text.match(/,\s*[A-Z]{2}\s+\d{5}/)
-                )) {
-                    address = text;
-                }
-                
-                // Phone detection - improved pattern
-                if (!phone && text.match(/^[\+]?[(]?\d{1,3}[)]?[-\s\.]?\d{1,4}[-\s\.]?\d{1,4}[-\s\.]?\d{1,9}$/)) {
-                    phone = text;
-                }
+            // Plus code
+            const plusCodeButton = document.querySelector('button[data-item-id="oloc"]');
+            if (plusCodeButton) {
+                data.plus_code = plusCodeButton.textContent.trim();
             }
 
-            return { address, phone, website };
+            // Check if permanently closed
+            const closedText = document.body.textContent;
+            data.isClosed = closedText.includes('Permanently closed') || closedText.includes('Closed permanently');
+
+            // Try to find email in the visible content (some businesses show it)
+            const emailMatch = document.body.textContent.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+            if (emailMatch) {
+                data.email = emailMatch[0];
+            }
+
+            return data;
         });
 
-        // Check if permanently closed
-        const isClosed = await card.evaluate((el) => {
-            const text = el.textContent.toLowerCase();
-            return text.includes('permanently closed') || text.includes('closed permanently');
-        }).catch(() => false);
+        log.info(`Extracted: ${placeData.business_name} | Phone: ${placeData.phone || 'N/A'} | Website: ${placeData.website || 'N/A'}`);
 
-        return {
-            business_name: businessName,
-            address: details.address,
-            phone: details.phone,
-            website: details.website,
-            rating: rating,
-            email: null,
-            isClosed: isClosed
-        };
+        return placeData;
+
     } catch (error) {
-        log.warning(`Failed to extract place details: ${error.message}`);
+        log.warning(`Failed to extract detailed info: ${error.message}`);
         return null;
     }
 }
@@ -302,7 +348,7 @@ try {
                 let placesExtractedThisQuery = 0;
                 let scrollAttempts = 0;
                 let noNewResultsCount = 0;
-                let previousCardCount = 0;
+                let processedCardIndices = new Set();
 
                 log.info('Starting to extract all available places...');
 
@@ -316,11 +362,19 @@ try {
                     const cards = await page.$$('div[role="feed"] > div > div[jsaction]');
                     log.info(`Found ${cards.length} result cards (scroll attempt ${scrollAttempts + 1})`);
 
-                    const newCards = cards.slice(previousCardCount);
                     let newPlacesThisScroll = 0;
 
-                    for (const card of newCards) {
-                        const placeData = await extractPlaceDetails(card, log);
+                    // Process cards we haven't seen yet
+                    for (let i = 0; i < cards.length; i++) {
+                        if (processedCardIndices.has(i)) {
+                            continue;
+                        }
+
+                        const card = cards[i];
+                        processedCardIndices.add(i);
+
+                        // Extract detailed info by clicking on the card
+                        const placeData = await extractDetailedPlaceInfo(page, card, log);
                         
                         if (!placeData || !placeData.business_name) {
                             continue;
@@ -355,8 +409,8 @@ try {
 
                         seenPlaces.add(placeKey);
 
-                        // Extract email from website
-                        if (placeData.website) {
+                        // Extract email from website if available and no email found yet
+                        if (placeData.website && !placeData.email) {
                             const emailPage = await page.context().newPage();
                             try {
                                 placeData.email = await extractEmailFromWebsite(
@@ -382,12 +436,11 @@ try {
                         totalExtracted++;
                         newPlacesThisScroll++;
 
-                        log.info(`✅ Extracted #${totalExtracted}: ${placeData.business_name} ${placeData.website ? '(has website)' : '(no website)'}`);
+                        log.info(`✅ Extracted #${totalExtracted}: ${placeData.business_name}`);
+                        log.info(`   📞 ${placeData.phone || 'No phone'} | 🌐 ${placeData.website ? 'Has website' : 'No website'} | ⭐ ${placeData.rating || 'N/A'}`);
                     }
 
-                    previousCardCount = cards.length;
-
-                    if (newPlacesThisScroll === 0 && newCards.length === 0) {
+                    if (newPlacesThisScroll === 0) {
                         noNewResultsCount++;
                         log.info(`No new results (${noNewResultsCount}/${NO_NEW_RESULTS_THRESHOLD})`);
                         
