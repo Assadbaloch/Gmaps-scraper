@@ -1,0 +1,66 @@
+{
+  "title": "Google Maps Bulk Scraper Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "queries": {
+      "title": "Search Queries",
+      "type": "array",
+      "description": "Array of search queries. Each query needs searchTerm and location. Processed in chronological order.",
+      "editor": "json",
+      "prefill": [
+        {
+          "searchTerm": "restaurants",
+          "location": "New York, NY"
+        },
+        {
+          "searchTerm": "coffee shops",
+          "location": "Brooklyn, NY"
+        }
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "searchTerm": {
+            "type": "string",
+            "description": "What to search for (e.g., 'italian restaurants')"
+          },
+          "location": {
+            "type": "string",
+            "description": "Where to search (e.g., 'San Francisco, CA')"
+          }
+        },
+        "required": ["searchTerm", "location"]
+      },
+      "minItems": 1
+    },
+    "language": {
+      "title": "Language",
+      "type": "string",
+      "description": "Language code for Google Maps (e.g., 'en', 'es', 'fr')",
+      "default": "en",
+      "editor": "textfield"
+    },
+    "skipClosedPlaces": {
+      "title": "Skip Closed Places",
+      "type": "boolean",
+      "description": "Skip permanently closed locations",
+      "default": true
+    },
+    "minRating": {
+      "title": "Minimum Rating",
+      "type": "number",
+      "description": "Minimum rating (1-5). Leave empty to include all ratings",
+      "minimum": 1,
+      "maximum": 5,
+      "nullable": true
+    },
+    "requireWebsite": {
+      "title": "Require Website",
+      "type": "boolean",
+      "description": "Only include places that have a website",
+      "default": false
+    }
+  },
+  "required": ["queries"]
+}

@@ -1,0 +1,14 @@
+{
+  "actorSpecification": 1,
+  "name": "google-maps-bulk-scraper",
+  "title": "Google Maps Bulk Scraper with Email Extraction",
+  "description": "Extract ALL business information from Google Maps using bulk queries. Supports unlimited results per query, processes in chronological order, and stores everything in a single dataset. Includes email extraction from websites.",
+  "version": "2.0.0",
+  "meta": {
+    "templateId": "js-start"
+  },
+  "input": "./input_schema.json",
+  "dockerfile": "./Dockerfile",
+  "readme": "./README.md",
+  "categories": ["BUSINESS"]
+}

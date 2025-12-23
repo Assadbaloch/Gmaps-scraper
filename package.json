@@ -1,0 +1,17 @@
+{
+  "name": "google-maps-bulk-scraper",
+  "version": "2.0.0",
+  "description": "Production-ready bulk Google Maps scraper with email extraction",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "apify": "^3.2.0",
+    "crawlee": "^3.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

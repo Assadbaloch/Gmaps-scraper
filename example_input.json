@@ -1,0 +1,28 @@
+{
+  "queries": [
+    {
+      "searchTerm": "italian restaurants",
+      "location": "New York, NY"
+    },
+    {
+      "searchTerm": "sushi restaurants",
+      "location": "New York, NY"
+    },
+    {
+      "searchTerm": "mexican restaurants",
+      "location": "Brooklyn, NY"
+    },
+    {
+      "searchTerm": "coffee shops",
+      "location": "Manhattan, NY"
+    },
+    {
+      "searchTerm": "bakeries",
+      "location": "Queens, NY"
+    }
+  ],
+  "language": "en",
+  "skipClosedPlaces": true,
+  "minRating": 4.0,
+  "requireWebsite": true
+}
