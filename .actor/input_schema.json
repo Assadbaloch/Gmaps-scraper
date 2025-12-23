@@ -22,10 +22,12 @@
         "type": "object",
         "properties": {
           "searchTerm": {
+            "title": "Search Term",
             "type": "string",
             "description": "What to search for (e.g., 'italian restaurants')"
           },
           "location": {
+            "title": "Location",
             "type": "string",
             "description": "Where to search (e.g., 'San Francisco, CA')"
           }
