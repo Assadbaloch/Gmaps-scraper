@@ -78,7 +78,6 @@ async function scrollResultsPanel(page, log) {
         
         const newHeight = await scrollableDiv.evaluate((el) => el.scrollHeight);
         
-        // Return true if content loaded (height increased)
         return newHeight > previousHeight;
     } catch (error) {
         log.warning(`Scroll failed: ${error.message}`);
@@ -87,10 +86,11 @@ async function scrollResultsPanel(page, log) {
 }
 
 /**
- * Extract place details from a result card
+ * Extract place details from a result card - IMPROVED VERSION
  */
 async function extractPlaceDetails(card, log) {
     try {
+        // Extract business name
         const businessName = await card.$eval('a[aria-label]', (el) => {
             const ariaLabel = el.getAttribute('aria-label');
             return ariaLabel || el.textContent.trim();
@@ -107,48 +107,70 @@ async function extractPlaceDetails(card, log) {
             return match ? parseFloat(match[1]) : null;
         }).catch(() => null);
 
-        // Extract address, phone, website
-        const details = await card.$$eval('div', (divs) => {
+        // IMPROVED: Extract all information including website
+        const details = await card.evaluate((cardElement) => {
             let address = null;
             let phone = null;
             let website = null;
 
-            divs.forEach((div) => {
+            // Get all text content
+            const allText = cardElement.textContent;
+
+            // Find all links in the card
+            const links = cardElement.querySelectorAll('a');
+            
+            // Look for website link - improved detection
+            for (const link of links) {
+                const href = link.getAttribute('href');
+                const ariaLabel = link.getAttribute('aria-label');
+                
+                // Check if it's a website link (not Google links)
+                if (href && (
+                    (href.startsWith('http') && !href.includes('google.com')) ||
+                    (ariaLabel && ariaLabel.toLowerCase().includes('website'))
+                )) {
+                    // If it's a Google redirect, extract the actual URL
+                    if (href.includes('/url?q=')) {
+                        try {
+                            const urlParams = new URLSearchParams(href.split('?')[1]);
+                            website = urlParams.get('q') || href;
+                        } catch (e) {
+                            website = href;
+                        }
+                    } else {
+                        website = href;
+                    }
+                    break;
+                }
+            }
+
+            // Extract address - look for text with street patterns
+            const divs = cardElement.querySelectorAll('div');
+            for (const div of divs) {
                 const text = div.textContent.trim();
                 
-                // Address detection (contains common address patterns)
-                if (!address && (text.match(/\d+.*(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Lane|Way|Court|Place|Circle)/i) || 
-                    text.match(/^\d+\s+[A-Za-z]/))) {
+                // Address detection
+                if (!address && (
+                    text.match(/\d+.*(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Lane|Way|Court|Place|Circle|Plaza|Parkway)/i) ||
+                    text.match(/^\d+\s+[A-Za-z]/) ||
+                    text.match(/,\s*[A-Z]{2}\s+\d{5}/)
+                )) {
                     address = text;
                 }
                 
-                // Phone detection
-                if (!phone && text.match(/^\+?\d{1,3}?[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}$/)) {
+                // Phone detection - improved pattern
+                if (!phone && text.match(/^[\+]?[(]?\d{1,3}[)]?[-\s\.]?\d{1,4}[-\s\.]?\d{1,4}[-\s\.]?\d{1,9}$/)) {
                     phone = text;
                 }
-            });
-
-            // Website detection
-            const websiteLink = Array.from(divs).find((div) => {
-                const links = div.querySelectorAll('a');
-                return Array.from(links).some((link) => {
-                    const href = link.getAttribute('href');
-                    return href && !href.includes('google.com') && 
-                           (href.startsWith('http') || href.startsWith('www'));
-                });
-            });
-
-            if (websiteLink) {
-                const link = websiteLink.querySelector('a');
-                website = link?.getAttribute('href');
             }
 
             return { address, phone, website };
         });
 
         // Check if permanently closed
-        const isClosed = await card.$eval('*', (el) => {
-            return el.textContent.includes('Permanently closed');
+        const isClosed = await card.evaluate((el) => {
+            const text = el.textContent.toLowerCase();
+            return text.includes('permanently closed') || text.includes('closed permanently');
         }).catch(() => false);
 
         return {
@@ -172,7 +194,7 @@ async function extractPlaceDetails(card, log) {
 async function waitForResults(page, log) {
     try {
         await page.waitForSelector('div[role="feed"]', { timeout: 15000 });
-        await page.waitForTimeout(3000); // Allow initial results to render
+        await page.waitForTimeout(3000);
         return true;
     } catch (error) {
         log.error('Results panel did not load');
@@ -185,8 +207,13 @@ async function waitForResults(page, log) {
  */
 async function isEndOfResults(page, log) {
     try {
-        const endMessage = await page.$('span:has-text("You\'ve reached the end of the list")');
-        if (endMessage) {
+        const endText = await page.evaluate(() => {
+            const body = document.body.textContent;
+            return body.includes("You've reached the end of the list") || 
+                   body.includes("You've reached the end");
+        });
+        
+        if (endText) {
             log.info('Reached end of results');
             return true;
         }
@@ -205,13 +232,12 @@ await Actor.init();
 try {
     const input = await Actor.getInput();
     
-    // Validate input
     if (!input) {
         throw new Error('Input is required');
     }
 
     const {
-        queries = [], // Array of {searchTerm, location} objects
+        queries = [],
         language = 'en',
         skipClosedPlaces = true,
         minRating = null,
@@ -242,11 +268,9 @@ try {
 
     console.log('Queries to process:', queries);
 
-    // Global deduplication set across ALL queries
     const seenPlaces = new Set();
     let totalExtracted = 0;
 
-    // Process queries sequentially (chronological order)
     for (let queryIndex = 0; queryIndex < queries.length; queryIndex++) {
         const query = queries[queryIndex];
         const { searchTerm, location } = query;
@@ -256,7 +280,6 @@ try {
         console.log(`Search: "${searchTerm}" | Location: "${location}"`);
         console.log(`${'='.repeat(80)}\n`);
 
-        // Create crawler for this specific query
         const crawler = new PlaywrightCrawler({
             launchContext: {
                 launchOptions: {
@@ -270,7 +293,6 @@ try {
             async requestHandler({ page, request, log }) {
                 log.info(`Loading Google Maps for: "${searchTerm}" in "${location}"`);
 
-                // Wait for results to load
                 const resultsLoaded = await waitForResults(page, log);
                 if (!resultsLoaded) {
                     log.error('Failed to load results, skipping this query');
@@ -284,9 +306,7 @@ try {
 
                 log.info('Starting to extract all available places...');
 
-                // Keep scrolling until no more results
                 while (scrollAttempts < MAX_SCROLL_ATTEMPTS) {
-                    // Check if we've reached the end
                     const reachedEnd = await isEndOfResults(page, log);
                     if (reachedEnd) {
                         log.info('Reached end of results');
@@ -296,7 +316,6 @@ try {
                     const cards = await page.$$('div[role="feed"] > div > div[jsaction]');
                     log.info(`Found ${cards.length} result cards (scroll attempt ${scrollAttempts + 1})`);
 
-                    // Process new cards only
                     const newCards = cards.slice(previousCardCount);
                     let newPlacesThisScroll = 0;
 
@@ -309,34 +328,34 @@ try {
 
                         // Apply filters
                         if (skipClosedPlaces && placeData.isClosed) {
-                            log.info(`Skipping closed place: ${placeData.business_name}`);
+                            log.info(`❌ Skipping closed: ${placeData.business_name}`);
                             continue;
                         }
 
                         if (requireWebsite && !placeData.website) {
-                            log.info(`Skipping place without website: ${placeData.business_name}`);
+                            log.info(`❌ Skipping (no website): ${placeData.business_name}`);
                             continue;
                         }
 
                         if (minRating !== null && (placeData.rating === null || placeData.rating < minRating)) {
-                            log.info(`Skipping place below min rating (${placeData.rating}): ${placeData.business_name}`);
+                            log.info(`❌ Skipping (low rating ${placeData.rating}): ${placeData.business_name}`);
                             continue;
                         }
 
-                        // Global deduplication across all queries
+                        // Deduplication
                         const placeKey = generatePlaceKey(
                             placeData.business_name, 
                             placeData.address || ''
                         );
 
                         if (seenPlaces.has(placeKey)) {
-                            log.info(`Duplicate found (already in dataset): ${placeData.business_name}`);
+                            log.info(`⚠️ Duplicate: ${placeData.business_name}`);
                             continue;
                         }
 
                         seenPlaces.add(placeKey);
 
-                        // Extract email from website if available
+                        // Extract email from website
                         if (placeData.website) {
                             const emailPage = await page.context().newPage();
                             try {
@@ -350,27 +369,24 @@ try {
                             }
                         }
 
-                        // Remove temporary fields
                         delete placeData.isClosed;
 
-                        // Add metadata about which query found this place
+                        // Add query metadata
                         placeData.query_searchTerm = searchTerm;
                         placeData.query_location = location;
                         placeData.query_index = queryIndex + 1;
 
-                        // Save to dataset (singular dataset for all queries)
                         await Dataset.pushData(placeData);
                         
                         placesExtractedThisQuery++;
                         totalExtracted++;
                         newPlacesThisScroll++;
 
-                        log.info(`✓ Extracted place #${totalExtracted} (Query ${queryIndex + 1}/${queries.length}): ${placeData.business_name}`);
+                        log.info(`✅ Extracted #${totalExtracted}: ${placeData.business_name} ${placeData.website ? '(has website)' : '(no website)'}`);
                     }
 
                     previousCardCount = cards.length;
 
-                    // Check if we're getting new results
                     if (newPlacesThisScroll === 0 && newCards.length === 0) {
                         noNewResultsCount++;
                         log.info(`No new results (${noNewResultsCount}/${NO_NEW_RESULTS_THRESHOLD})`);
@@ -383,7 +399,6 @@ try {
                         noNewResultsCount = 0;
                     }
 
-                    // Scroll to load more results
                     const scrolled = await scrollResultsPanel(page, log);
                     scrollAttempts++;
 
@@ -393,7 +408,7 @@ try {
                     }
                 }
 
-                log.info(`\nCompleted Query ${queryIndex + 1}/${queries.length}:`);
+                log.info(`\n📊 Completed Query ${queryIndex + 1}/${queries.length}:`);
                 log.info(`  - Search: "${searchTerm}"`);
                 log.info(`  - Location: "${location}"`);
                 log.info(`  - Places extracted: ${placesExtractedThisQuery}`);
@@ -405,7 +420,6 @@ try {
             }
         });
 
-        // Create request for this query
         const searchQuery = `${searchTerm} ${location}`;
         const url = `${GOOGLE_MAPS_URL}${encodeURIComponent(searchQuery)}?hl=${language}`;
         
@@ -414,14 +428,13 @@ try {
             userData: { searchTerm, location, queryIndex }
         }];
 
-        // Run crawler for this query
         await crawler.run(requests);
 
         console.log(`Completed processing query ${queryIndex + 1}/${queries.length}`);
     }
 
     console.log('\n' + '='.repeat(80));
-    console.log('ACTOR COMPLETED SUCCESSFULLY');
+    console.log('🎉 ACTOR COMPLETED SUCCESSFULLY');
     console.log('='.repeat(80));
     console.log(`Total queries processed: ${queries.length}`);
     console.log(`Total unique places extracted: ${totalExtracted}`);
@@ -429,7 +442,7 @@ try {
     console.log('='.repeat(80) + '\n');
 
 } catch (error) {
-    console.error('Actor failed with error:', error);
+    console.error('❌ Actor failed with error:', error);
     throw error;
 }
 
