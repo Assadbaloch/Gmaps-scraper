@@ -182,52 +182,108 @@ async function extractPlaceDetailsFromPage(page, log) {
                 }
             }
 
-            // Get all buttons with data-item-id
-            const allButtons = document.querySelectorAll('button[data-item-id]');
-            
-            allButtons.forEach(button => {
-                const ariaLabel = button.getAttribute('aria-label') || '';
-                const itemId = button.getAttribute('data-item-id');
+            // IMPROVED WEBSITE DETECTION - Multiple methods
+            // Method 1: Look for links with "Website" text or aria-label
+            const allLinks = Array.from(document.querySelectorAll('a[href]'));
+            for (const link of allLinks) {
+                const href = link.getAttribute('href');
+                const ariaLabel = link.getAttribute('aria-label') || '';
+                const text = link.textContent.toLowerCase();
                 
-                // Address
-                if (itemId && itemId.startsWith('address')) {
-                    data.address = button.textContent.trim();
-                }
-                
-                // Website
-                if (ariaLabel.toLowerCase().includes('website') || itemId === 'authority') {
-                    const link = button.querySelector('a[href]');
-                    if (link) {
-                        let href = link.getAttribute('href');
-                        // Handle Google redirect URLs
-                        if (href && href.includes('/url?q=')) {
-                            try {
-                                const urlParams = new URLSearchParams(href.split('?')[1]);
-                                data.website = decodeURIComponent(urlParams.get('q') || '');
-                            } catch (e) {
-                                data.website = href;
+                // Check if this is a website link
+                if ((ariaLabel.toLowerCase().includes('website') || 
+                     text.includes('website')) && 
+                    href && !data.website) {
+                    
+                    // Handle Google redirect URLs
+                    if (href.includes('/url?q=')) {
+                        try {
+                            const urlParams = new URLSearchParams(href.split('?')[1]);
+                            const extractedUrl = decodeURIComponent(urlParams.get('q') || '');
+                            if (extractedUrl && !extractedUrl.includes('google.com')) {
+                                data.website = extractedUrl;
+                                break;
                             }
-                        } else if (href && !href.includes('google.com')) {
-                            data.website = href;
+                        } catch (e) {
+                            // Continue to next method
+                        }
+                    } else if (!href.includes('google.com') && !href.startsWith('/')) {
+                        data.website = href;
+                        break;
+                    }
+                }
+            }
+
+            // Method 2: Look in all buttons for website
+            if (!data.website) {
+                const allButtons = document.querySelectorAll('button, a');
+                for (const button of allButtons) {
+                    const ariaLabel = button.getAttribute('aria-label') || '';
+                    if (ariaLabel.toLowerCase().includes('website')) {
+                        const link = button.querySelector('a[href]') || button;
+                        const href = link.getAttribute('href');
+                        if (href) {
+                            if (href.includes('/url?q=')) {
+                                try {
+                                    const urlParams = new URLSearchParams(href.split('?')[1]);
+                                    data.website = decodeURIComponent(urlParams.get('q') || '');
+                                    break;
+                                } catch (e) {}
+                            } else if (!href.includes('google.com')) {
+                                data.website = href;
+                                break;
+                            }
                         }
                     }
                 }
+            }
+
+            // IMPROVED PHONE AND ADDRESS DETECTION
+            const allButtons = document.querySelectorAll('button[data-item-id], div[data-item-id]');
+            
+            allButtons.forEach(element => {
+                const ariaLabel = element.getAttribute('aria-label') || '';
+                const itemId = element.getAttribute('data-item-id') || '';
+                const text = element.textContent.trim();
                 
-                // Phone number
-                if (ariaLabel.toLowerCase().includes('phone') || itemId && itemId.includes('phone')) {
-                    // Extract phone from aria-label or text
-                    const phoneMatch = ariaLabel.match(/[\+\(]?[\d\s\-\(\)\.]+/) || 
-                                     button.textContent.match(/[\+\(]?[\d\s\-\(\)\.]+/);
+                // Address
+                if (!data.address && (itemId.startsWith('address') || ariaLabel.toLowerCase().includes('address'))) {
+                    data.address = text;
+                }
+                
+                // Phone number - improved detection
+                if (!data.phone && (ariaLabel.toLowerCase().includes('phone') || 
+                    ariaLabel.toLowerCase().includes('call') ||
+                    itemId.includes('phone'))) {
+                    
+                    // Try to extract from aria-label first
+                    const phoneMatch = ariaLabel.match(/[\+\(]?[\d\s\-\(\)\.]{7,}/);
                     if (phoneMatch) {
                         data.phone = phoneMatch[0].trim();
+                    } else {
+                        // Try from text content
+                        const phoneMatchText = text.match(/[\+\(]?[\d\s\-\(\)\.]{7,}/);
+                        if (phoneMatchText) {
+                            data.phone = phoneMatchText[0].trim();
+                        }
                     }
                 }
                 
                 // Plus code
                 if (itemId === 'oloc') {
-                    data.plus_code = button.textContent.trim();
+                    data.plus_code = text;
                 }
             });
+
+            // Alternative phone detection from page text
+            if (!data.phone) {
+                const phoneRegex = /(\+?\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
+                const pageText = document.body.textContent;
+                const phoneMatch = pageText.match(phoneRegex);
+                if (phoneMatch) {
+                    data.phone = phoneMatch[0];
+                }
+            }
 
             // Check for permanently closed
             const bodyText = document.body.textContent.toLowerCase();
